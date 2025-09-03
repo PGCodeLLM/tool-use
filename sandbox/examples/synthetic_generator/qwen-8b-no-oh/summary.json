@@ -1,12 +1,10 @@
 {
   "model_name": "default",
   "dataset_path": "deathbyknowledge/shell-tasks",
-  "total_samples": 1404,
-  "successful_samples": 500,
-  "success_rate": 0.3561253561253561,
-  "failed_samples": 904,
-  "evaluation_time": "2025-09-03T04:07:03.595034+00:00",
-  "sandbox_image": "deathbyknowledge/shellm-sandbox:latest",
-  "model": "qwen-8B with no OH"
-
+  "total_samples": 5,
+  "successful_samples": 2,
+  "success_rate": 0.4,
+  "failed_samples": 3,
+  "evaluation_time": "2025-09-03T19:23:09.533839+00:00",
+  "sandbox_image": "deathbyknowledge/shellm-sandbox:latest"
 }

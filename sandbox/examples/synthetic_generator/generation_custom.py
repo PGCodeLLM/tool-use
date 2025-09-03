@@ -63,7 +63,7 @@ def load_jsonl(path: Path) -> List[Dict[str, Any]]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def setup_logger(output_dir: Path, task_id: str) -> logging.Logger:
+def setup_logger(output_dir: Path, task_id: str, enable_file_logging: bool = False) -> logging.Logger:
     """Setup a logger for a specific evaluation task."""
     logger = logging.getLogger(f"eval_{task_id}")
     logger.setLevel(logging.ERROR)
@@ -71,19 +71,28 @@ def setup_logger(output_dir: Path, task_id: str) -> logging.Logger:
     # Remove any existing handlers
     logger.handlers.clear()
     
-    # Ensure output directory exists
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if enable_file_logging:
+        # Ensure output directory exists
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create file handler
+        log_file = output_dir / f"task_{task_id}.log"
+        file_handler = logging.FileHandler(log_file, mode='w')
+        file_handler.setLevel(logging.ERROR)
+        
+        # Create formatter
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        
+        logger.addHandler(file_handler)
+    else:
+        # Add console handler instead (optional)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.ERROR)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
     
-    # Create file handler
-    log_file = output_dir / f"task_{task_id}.log"
-    file_handler = logging.FileHandler(log_file, mode='w')
-    file_handler.setLevel(logging.ERROR)
-    
-    # Create formatter
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    
-    logger.addHandler(file_handler)
     return logger
 
 
@@ -202,6 +211,7 @@ class ModelInterface:
             
             # Remove trailing backticks
             command = command.rstrip('`').strip()
+            print(f"Result Output: {repr(command)}")
             
             return command
             
@@ -235,7 +245,9 @@ async def evaluate_single_task(
     
     # Setup logger for this task
     logger = setup_logger(output_dir, task_id)
-    
+    logger.disabled = True
+    logger.propagate = False
+
     try:
         logger.info(f"STEP 1: Generate command for task")
         logger.info(f"Task: {task_data['task']}")
