@@ -1,6 +1,13 @@
 # Sea of Simualtion (SoS)
 A service to manage sandboxed containers for shell agents.
 
+# Run Custom Sandbox
+1. Go to `examples/synthetic_generator/generation_custom.py`
+2. Run example ```uv run generation_custom.py --model "default" --dataset "deathbyknowledge/shell-tasks" --max-samples 2000 --output-dir "qwen-8b-with-oh" --base-url "https://lux-2-cyber-08.tailb940e6.ts.net/sglang1/v1" --api-key "mykey233"```
+   Keep dataset, the rest can be changed
+
+
+
 ![sos.png](sos.png)
 ## Features
 

@@ -1,0 +1,1 @@
+uv run generation_custom.py --model "default" --dataset "deathbyknowledge/shell-tasks" --max-samples 2000 --output-dir "qwen-8b-with-oh" --base-url "https://lux-2-cyber-08.tailb940e6.ts.net/sglang1/v1" --api-key "mykey233"
