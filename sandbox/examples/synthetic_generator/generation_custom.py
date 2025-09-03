@@ -114,7 +114,7 @@ class ModelInterface:
             http_client=httpx.AsyncClient(timeout=60.0),
         )
     
-    async def generate_command(self, task: str, temperature: float = 0.7, max_tokens: int = 128) -> str:
+    async def generate_command(self, task: str, temperature: float = 0.1, max_tokens: int = 512) -> str:
         """Generate shell command for a given task."""
         if self.mock_mode:
             return self._mock_generate_command(task)
@@ -153,19 +153,26 @@ class ModelInterface:
             return "echo 'Task completed'"
     
     @retry(stop=stop_after_attempt(3))
-    async def _real_generate_command(self, task: str, temperature: float = 0.7, max_tokens: int = 128) -> str:
+    async def _real_generate_command(self, task: str, temperature: float = 0.1, max_tokens: int = 128) -> str:
         """Generate shell command using real API."""
+        # messages = [
+        #     {
+        #         "role": "system", 
+        #         "content": "You are an expert Linux shell user. Given a task description, provide ONLY the shell command needed to complete it. Do not include any thinking, explanations, reasoning, or additional text. Respond with just the raw shell command that can be executed directly."
+        #     },
+        #     {
+        #         "role": "user", 
+        #         "content": f"Task: {task}\n\nShell command:"
+        #     }
+            
+        # ]
         messages = [
             {
-                "role": "system", 
-                "content": "You are an expert Linux shell user. Given a task description, provide ONLY the shell command needed to complete it. Do not include any thinking, explanations, reasoning, or additional text. Respond with just the raw shell command that can be executed directly."
-            },
-            {
                 "role": "user", 
-                "content": f"Task: {task}\n\nShell command:"
+                "content": f"{task}"
             }
+            
         ]
-        
         try:
             response = await self.client.chat.completions.create(
                 model=self.model_name,
@@ -332,8 +339,8 @@ async def evaluate_model(
     sandbox_image: str = "deathbyknowledge/shellm-sandbox:latest",
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
-    temperature: float = 0.7,
-    max_tokens: int = 128
+    temperature: float = 0.1,
+    max_tokens: int = 512
 ) -> None:
     """
     Main evaluation pipeline.
@@ -441,8 +448,8 @@ if __name__ == "__main__":
     parser.add_argument("--sandbox-image", default="deathbyknowledge/shellm-sandbox:latest", help="Docker image for sandbox")
     parser.add_argument("--base-url", help="OpenAI-compatible API base URL (default: https://api.openai.com/v1)")
     parser.add_argument("--api-key", help="API key (can also use OPENAI_API_KEY env var)")
-    parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
-    parser.add_argument("--max-tokens", type=int, default=128, help="Maximum tokens to generate")
+    parser.add_argument("--temperature", type=float, default=0.1, help="Sampling temperature")
+    parser.add_argument("--max-tokens", type=int, default=512, help="Maximum tokens to generate")
     
     args = parser.parse_args()
     
