@@ -388,6 +388,7 @@ async def evaluate_model(
     # Run evaluation with progress bar
     results = []
     success_count = 0
+    eval_start_time = datetime.now(timezone.utc)
     
     with Progress() as progress:
         task_progress = progress.add_task("Evaluating", total=len(dataset))
@@ -402,11 +403,13 @@ async def evaluate_model(
             # Save result immediately
             append_jsonl(results_file, result)
             
-            # Update progress
+            # Update progress with elapsed time
+            elapsed = datetime.now(timezone.utc) - eval_start_time
+            elapsed_str = f"{int(elapsed.total_seconds()//3600):02d}:{int((elapsed.total_seconds()%3600)//60):02d}:{int(elapsed.total_seconds()%60):02d}"
             progress.update(
                 task_progress, 
                 advance=1,
-                description=f"Evaluating ({success_count}/{i+1} successful)"
+                description=f"Evaluating ({success_count}/{i+1} successful) - Elapsed: {elapsed_str}"
             )
             
             # Print status every 10 samples
