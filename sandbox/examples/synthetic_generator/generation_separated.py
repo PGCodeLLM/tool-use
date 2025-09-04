@@ -607,8 +607,10 @@ async def run_inference_phase(
     api_key: Optional[str] = None,
     temperature: float = 0.6,
     max_tokens: int = 2000,
-) -> Path:
-    """Run only the inference phase."""
+) -> Tuple[Path, Path]:
+    """Run only the inference phase and generate summary."""
+    start_time = datetime.now(timezone.utc)
+    
     # Initialize model
     mock_mode = model_name.lower() == "mock" or base_url is None
     model = ModelInterface(model_name, base_url=base_url, api_key=api_key, mock_mode=mock_mode)
@@ -629,9 +631,48 @@ async def run_inference_phase(
     # Setup output
     output_path = Path(output_dir)
     commands_file = output_path / "commands.jsonl"
+    summary_file = output_path / "summary.json"
     
     await batch_generate_commands(model, dataset, commands_file, temperature, max_tokens)
-    return commands_file
+    
+    # Calculate timing
+    end_time = datetime.now(timezone.utc)
+    duration_seconds = (end_time - start_time).total_seconds()
+    
+    # Generate summary from generated commands
+    commands_data = load_jsonl(commands_file)
+    total_samples = len(commands_data)
+    successful_generations = sum(1 for cmd in commands_data if cmd.get('generated_command') is not None)
+    generation_success_rate = successful_generations / total_samples if total_samples > 0 else 0
+    
+    summary = {
+        "phase": "inference_only",
+        "model_name": model_name,
+        "dataset_path": dataset_path,
+        "total_samples": total_samples,
+        "successful_generations": successful_generations,
+        "generation_success_rate": generation_success_rate,
+        "failed_generations": total_samples - successful_generations,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "mock_mode": mock_mode,
+        "duration_seconds": duration_seconds,
+        "start_time": start_time.isoformat(),
+        "end_time": end_time.isoformat(),
+    }
+    
+    with summary_file.open("w") as f:
+        json.dump(summary, f, indent=2)
+    
+    # Format duration for display
+    duration_str = f"{int(duration_seconds//60):02d}:{int(duration_seconds%60):02d}"
+    
+    print(f"Inference complete: {successful_generations}/{total_samples} commands generated ({generation_success_rate:.1%})")
+    print(f"Duration: {duration_str}, Temperature: {temperature}, Max tokens: {max_tokens}")
+    print(f"Commands: {commands_file}")
+    print(f"Summary: {summary_file}")
+    
+    return commands_file, summary_file
 
 
 async def run_execution_phase(
@@ -641,17 +682,65 @@ async def run_execution_phase(
     sandbox_image: str = "deathbyknowledge/shellm-sandbox:latest",
     concurrency: int = 4,
     pool_size: int = 8,
-) -> Path:
-    """Run only the execution phase."""
+) -> Tuple[Path, Path]:
+    """Run only the execution phase and generate summary."""
+    start_time = datetime.now(timezone.utc)
+    
     # Initialize SoS client
     sos = SoSClient(server_url=f"http://localhost:{port}")
     
     # Setup output
     output_path = Path(output_dir)
     results_file = output_path / "results.jsonl"
+    summary_file = output_path / "summary.json"
     
     await batch_execute_commands(commands_file, sos, results_file, sandbox_image, concurrency, pool_size)
-    return results_file
+    
+    # Calculate timing
+    end_time = datetime.now(timezone.utc)
+    duration_seconds = (end_time - start_time).total_seconds()
+    
+    # Generate summary from execution results
+    results = load_jsonl(results_file)
+    total_samples = len(results)
+    successful_samples = sum(1 for r in results if r.get('overall_success', False))
+    success_rate = successful_samples / total_samples if total_samples > 0 else 0
+    
+    # Count setup groups for additional stats
+    setup_groups = defaultdict(int)
+    for result in results:
+        setup_hash = result.get('setup_hash', 'unknown')
+        setup_groups[setup_hash] += 1
+    
+    summary = {
+        "phase": "execution_only",
+        "commands_file": str(commands_file),
+        "total_samples": total_samples,
+        "successful_samples": successful_samples,
+        "success_rate": success_rate,
+        "failed_samples": total_samples - successful_samples,
+        "setup_groups": len(setup_groups),
+        "concurrency": concurrency,
+        "pool_size": pool_size,
+        "sandbox_image": sandbox_image,
+        "duration_seconds": duration_seconds,
+        "start_time": start_time.isoformat(),
+        "end_time": end_time.isoformat(),
+        "evaluation_time": utc_now_iso(),
+    }
+    
+    with summary_file.open("w") as f:
+        json.dump(summary, f, indent=2)
+    
+    # Format duration for display
+    duration_str = f"{int(duration_seconds//60):02d}:{int(duration_seconds%60):02d}"
+    
+    print(f"Execution complete: {successful_samples}/{total_samples} successful ({success_rate:.1%})")
+    print(f"Duration: {duration_str}, Setup groups: {len(setup_groups)}, Concurrency: {concurrency}, Pool size: {pool_size}")
+    print(f"Results: {results_file}")
+    print(f"Summary: {summary_file}")
+    
+    return results_file, summary_file
 
 
 async def run_both_phases(
@@ -672,49 +761,73 @@ async def run_both_phases(
     print("=== Running Both Phases ===")
     
     # Phase 1: Generate commands
-    commands_file = await run_inference_phase(
+    commands_file, inference_summary_file = await run_inference_phase(
         model_name, dataset_path, output_dir, max_samples,
         base_url, api_key, temperature, max_tokens
     )
     
-    # Phase 2: Execute commands
-    results_file = await run_execution_phase(
+    # Phase 2: Execute commands (now includes summary generation)
+    results_file, summary_file = await run_execution_phase(
         commands_file, output_dir, port, sandbox_image, concurrency, pool_size
     )
     
-    # Generate summary
-    results = load_jsonl(results_file)
-    total_samples = len(results)
-    successful_samples = sum(1 for r in results if r.get('overall_success', False))
-    success_rate = successful_samples / total_samples if total_samples > 0 else 0
+    # Combine both phase summaries into final summary
+    inference_summary = {}
+    execution_summary = {}
     
-    # Count setup groups for additional stats
-    setup_groups = defaultdict(int)
-    for result in results:
-        setup_hash = result.get('setup_hash', 'unknown')
-        setup_groups[setup_hash] += 1
+    if inference_summary_file.exists():
+        with inference_summary_file.open("r") as f:
+            inference_summary = json.load(f)
     
-    summary = {
+    if summary_file.exists():
+        with summary_file.open("r") as f:
+            execution_summary = json.load(f)
+    
+    # Create combined summary
+    combined_summary = {
+        "phase": "both",
         "model_name": model_name,
         "dataset_path": dataset_path,
-        "total_samples": total_samples,
-        "successful_samples": successful_samples,
-        "success_rate": success_rate,
-        "failed_samples": total_samples - successful_samples,
-        "setup_groups": len(setup_groups),
+        
+        # Inference phase stats
+        "inference_duration_seconds": inference_summary.get("duration_seconds", 0),
+        "total_samples": inference_summary.get("total_samples", 0),
+        "successful_generations": inference_summary.get("successful_generations", 0),
+        "generation_success_rate": inference_summary.get("generation_success_rate", 0),
+        "temperature": inference_summary.get("temperature", temperature),
+        "max_tokens": inference_summary.get("max_tokens", max_tokens),
+        
+        # Execution phase stats
+        "execution_duration_seconds": execution_summary.get("duration_seconds", 0),
+        "successful_samples": execution_summary.get("successful_samples", 0),
+        "success_rate": execution_summary.get("success_rate", 0),
+        "failed_samples": execution_summary.get("failed_samples", 0),
+        "setup_groups": execution_summary.get("setup_groups", 0),
         "concurrency": concurrency,
         "pool_size": pool_size,
-        "evaluation_time": utc_now_iso(),
         "sandbox_image": sandbox_image,
+        
+        # Combined timing
+        "total_duration_seconds": inference_summary.get("duration_seconds", 0) + execution_summary.get("duration_seconds", 0),
+        "start_time": inference_summary.get("start_time", ""),
+        "end_time": execution_summary.get("end_time", ""),
+        "evaluation_time": utc_now_iso(),
     }
     
-    summary_file = Path(output_dir) / "summary.json"
     with summary_file.open("w") as f:
-        json.dump(summary, f, indent=2)
+        json.dump(combined_summary, f, indent=2)
+    
+    # Format durations for display
+    inf_duration = combined_summary["inference_duration_seconds"]
+    exec_duration = combined_summary["execution_duration_seconds"]
+    total_duration = combined_summary["total_duration_seconds"]
+    
+    inf_str = f"{int(inf_duration//60):02d}:{int(inf_duration%60):02d}"
+    exec_str = f"{int(exec_duration//60):02d}:{int(exec_duration%60):02d}"
+    total_str = f"{int(total_duration//60):02d}:{int(total_duration%60):02d}"
     
     print(f"=== Evaluation Complete ===")
-    print(f"Total: {total_samples}, Success: {successful_samples} ({success_rate:.1%}), Failed: {total_samples - successful_samples}")
-    print(f"Setup groups: {len(setup_groups)}, Concurrency: {concurrency}, Pool size: {pool_size}")
+    print(f"Inference: {inf_str}, Execution: {exec_str}, Total: {total_str}")
     print(f"Commands: {commands_file}")
     print(f"Results: {results_file}")
     print(f"Summary: {summary_file}")
@@ -759,7 +872,7 @@ if __name__ == "__main__":
     
     async def main():
         if args.phase == "inference":
-            commands_file = await run_inference_phase(
+            commands_file, summary_file = await run_inference_phase(
                 model_name=args.model,
                 dataset_path=args.dataset,
                 output_dir=args.output_dir,
@@ -769,7 +882,7 @@ if __name__ == "__main__":
                 temperature=args.temperature,
                 max_tokens=args.max_tokens,
             )
-            print(f"Inference complete. Commands saved to: {commands_file}")
+            print(f"Inference complete. Commands: {commands_file}, Summary: {summary_file}")
             
         elif args.phase == "execution":
             if not args.commands_file:
@@ -781,7 +894,7 @@ if __name__ == "__main__":
                 print(f"Error: Commands file not found: {commands_file}")
                 return
                 
-            results_file = await run_execution_phase(
+            results_file, summary_file = await run_execution_phase(
                 commands_file=commands_file,
                 output_dir=args.output_dir,
                 port=args.sos_port,
@@ -789,7 +902,7 @@ if __name__ == "__main__":
                 concurrency=args.concurrency,
                 pool_size=args.pool_size,
             )
-            print(f"Execution complete. Results saved to: {results_file}")
+            print(f"Execution complete. Results: {results_file}, Summary: {summary_file}")
             
         else:  # both
             await run_both_phases(
