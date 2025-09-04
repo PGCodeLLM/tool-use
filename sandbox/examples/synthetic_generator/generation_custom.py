@@ -363,14 +363,15 @@ async def evaluate_single_task(
 async def evaluate_model(
     model_name: str,
     dataset_path: str,
+    temperature: float,
+    max_tokens: int,
+    port: int,
     output_dir: str = "evaluation_results",
     max_samples: Optional[int] = None,
     sandbox_image: str = "deathbyknowledge/shellm-sandbox:latest",
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
-    temperature: float,
-    max_tokens: int,
-    port: int
+
 ) -> None:
     """
     Main evaluation pipeline.
@@ -390,6 +391,7 @@ async def evaluate_model(
     output_path = Path(output_dir)
     results_file = output_path / "results.jsonl"
     summary_file = output_path / "summary.json"
+    eval_start_time = datetime.now(timezone.utc)
     
     # Load model
     mock_mode = model_name.lower() == "mock" or base_url is None
@@ -438,6 +440,9 @@ async def evaluate_model(
                 advance=1,
                 description=f"Evaluating ({success_count}/{i+1} successful)"
             )
+            
+            elapsed = datetime.now(timezone.utc) - eval_start_time
+            elapsed_str = f"{int(elapsed.total_seconds()//3600):02d}:{int((elapsed.total_seconds()%3600)//60):02d}:{int(elapsed.total_seconds()%60):02d}"
             
             # Print status every 10 samples
             if (i + 1) % 10 == 0:
