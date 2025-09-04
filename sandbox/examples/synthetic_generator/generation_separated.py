@@ -722,8 +722,8 @@ async def run_both_phases(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate OpenAI-compatible model on shell tasks (separated phases)")
-    parser.add_argument("--model", required=True, help="Model name (e.g., 'gpt-4', 'gpt-3.5-turbo', 'mock' for testing)")
-    parser.add_argument("--dataset", required=True, help="Dataset path or HuggingFace dataset name")
+    parser.add_argument("--model", help="Model name (e.g., 'gpt-4', 'gpt-3.5-turbo', 'mock' for testing)")
+    parser.add_argument("--dataset", help="Dataset path or HuggingFace dataset name")
     parser.add_argument("--output-dir", default="evaluation_results", help="Output directory")
     parser.add_argument("--max-samples", type=int, help="Maximum samples to evaluate")
     parser.add_argument("--sandbox-image", default="deathbyknowledge/shellm-sandbox:latest", help="Docker image for sandbox")
@@ -745,6 +745,17 @@ if __name__ == "__main__":
                        help="Maximum number of sandboxes in pool (default: 8)")
     
     args = parser.parse_args()
+    
+    # Validate required arguments based on phase
+    if args.phase in ["inference", "both"]:
+        if not args.model:
+            parser.error("--model is required for inference phase")
+        if not args.dataset:
+            parser.error("--dataset is required for inference phase")
+    
+    if args.phase == "execution":
+        if not args.commands_file:
+            parser.error("--commands-file is required for execution-only phase")
     
     async def main():
         if args.phase == "inference":
