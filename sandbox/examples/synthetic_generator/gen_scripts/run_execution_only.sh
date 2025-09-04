@@ -5,7 +5,7 @@
 # Uses optimized sandbox pooling and concurrency
 
 # Default commands file location (edit as needed)
-COMMANDS_FILE="test-base/commands.jsonl"
+COMMANDS_FILE="results/qwen-8b-base-test/commands.jsonl"
 
 # Check if commands file exists
 if [ ! -f "$COMMANDS_FILE" ]; then

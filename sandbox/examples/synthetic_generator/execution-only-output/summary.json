@@ -1,0 +1,16 @@
+{
+  "phase": "execution_only",
+  "commands_file": "results/qwen-8b-base-test/commands.jsonl",
+  "total_samples": 10,
+  "successful_samples": 0,
+  "success_rate": 0.0,
+  "failed_samples": 10,
+  "setup_groups": 1,
+  "concurrency": 8,
+  "pool_size": 16,
+  "sandbox_image": "deathbyknowledge/shellm-sandbox:latest",
+  "duration_seconds": 0.084402,
+  "start_time": "2025-09-04T18:43:44.775324+00:00",
+  "end_time": "2025-09-04T18:43:44.859726+00:00",
+  "evaluation_time": "2025-09-04T18:43:44.859850+00:00"
+}
