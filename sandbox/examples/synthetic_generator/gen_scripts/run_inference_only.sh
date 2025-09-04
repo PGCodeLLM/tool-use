@@ -10,9 +10,9 @@ echo "This will generate commands without executing them in sandboxes"
 uv run generation_separated.py \
     --model "default" \
     --dataset "deathbyknowledge/shell-tasks" \
-    --max-samples 2000 \
+    --max-samples 50 \
     --temperature 0.6 \
-    --output-dir "inference-only-output" \
+    --output-dir "test-base" \
     --base-url "http://0.0.0.0:11151/v1" \
     --api-key "mykey233" \
     --phase inference

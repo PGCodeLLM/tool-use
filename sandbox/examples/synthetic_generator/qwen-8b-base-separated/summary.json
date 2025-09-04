@@ -1,0 +1,23 @@
+{
+  "phase": "both",
+  "model_name": "default",
+  "dataset_path": "deathbyknowledge/shell-tasks",
+  "inference_duration_seconds": 61.173975,
+  "total_samples": 1404,
+  "successful_generations": 0,
+  "generation_success_rate": 0,
+  "temperature": 0.6,
+  "max_tokens": 2000,
+  "execution_duration_seconds": 61.173975,
+  "successful_samples": 0,
+  "success_rate": 0.0,
+  "failed_samples": 1404,
+  "setup_groups": 1,
+  "concurrency": 6,
+  "pool_size": 12,
+  "sandbox_image": "deathbyknowledge/shellm-sandbox:latest",
+  "total_duration_seconds": 122.34795,
+  "start_time": "2025-09-04T10:36:55.501061+00:00",
+  "end_time": "2025-09-04T10:37:56.675036+00:00",
+  "evaluation_time": "2025-09-04T10:37:56.700699+00:00"
+}

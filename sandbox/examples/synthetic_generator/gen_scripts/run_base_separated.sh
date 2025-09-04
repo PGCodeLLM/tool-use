@@ -6,12 +6,13 @@
 time uv run generation_separated.py \
     --model "default" \
     --dataset "deathbyknowledge/shell-tasks" \
-    --max-samples 2000 \
+    --max-samples 10 \
     --temperature 0.6 \
-    --output-dir "qwen-8b-base-separated" \
+    --output-dir "qwen-8b-base-test" \
     --base-url "http://0.0.0.0:11153/v1" \
     --api-key "mykey233" \
     --sos-port 3002 \
     --concurrency 6 \
     --pool-size 12 \
-    --phase both
+    --phase both \
+    --max-tokens 32000

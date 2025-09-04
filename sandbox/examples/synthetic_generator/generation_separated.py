@@ -312,8 +312,8 @@ async def batch_generate_commands(
     model: ModelInterface,
     dataset: Dataset,
     output_file: Path,
-    temperature: float = 0.6,
-    max_tokens: int = 2000,
+    max_tokens: int,
+    temperature: float,
 ) -> None:
     """
     Phase 1: Generate all commands upfront and save to file.
@@ -602,11 +602,11 @@ async def run_inference_phase(
     model_name: str,
     dataset_path: str,
     output_dir: str,
+    temperature: float,
+    max_tokens: int,
     max_samples: Optional[int] = None,
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
-    temperature: float = 0.6,
-    max_tokens: int = 2000,
 ) -> Tuple[Path, Path]:
     """Run only the inference phase and generate summary."""
     start_time = datetime.now(timezone.utc)
@@ -624,7 +624,6 @@ async def run_inference_phase(
             dataset = load_dataset(dataset_path, split="test")
     else:
         dataset = load_dataset(dataset_path, split="test")
-    
     if max_samples:
         dataset = dataset.select(range(min(max_samples, len(dataset))))
     
@@ -633,7 +632,13 @@ async def run_inference_phase(
     commands_file = output_path / "commands.jsonl"
     summary_file = output_path / "summary.json"
     
-    await batch_generate_commands(model, dataset, commands_file, temperature, max_tokens)
+    await batch_generate_commands(
+        model=model, 
+        dataset=dataset, 
+        output_file=commands_file, 
+        max_tokens=max_tokens, 
+        temperature=temperature
+    )
     
     # Calculate timing
     end_time = datetime.now(timezone.utc)
@@ -746,6 +751,7 @@ async def run_execution_phase(
 async def run_both_phases(
     model_name: str,
     dataset_path: str,
+    max_tokens: int,
     output_dir: str = "evaluation_results",
     max_samples: Optional[int] = None,
     port: int = 3000,
@@ -753,22 +759,47 @@ async def run_both_phases(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     temperature: float = 0.6,
-    max_tokens: int = 2000,
     concurrency: int = 4,
     pool_size: int = 8,
 ) -> None:
     """Run both inference and execution phases."""
     print("=== Running Both Phases ===")
-    
+    # Print all parameters as dict
+    parameters = {
+        "model_name": model_name,
+        "dataset_path": dataset_path,
+        "max_tokens": max_tokens,
+        "output_dir": output_dir,
+        "max_samples": max_samples,
+        "port": port,
+        "sandbox_image": sandbox_image,
+        "base_url": base_url,
+        "api_key": "***" if api_key else None,
+        "temperature": temperature,
+        "concurrency": concurrency,
+        "pool_size": pool_size,
+    }
+    print(f"Parameters: {parameters}")
     # Phase 1: Generate commands
     commands_file, inference_summary_file = await run_inference_phase(
-        model_name, dataset_path, output_dir, max_samples,
-        base_url, api_key, temperature, max_tokens
+        model_name=model_name,
+        dataset_path=dataset_path,
+        output_dir=output_dir,
+        max_samples=max_samples,
+        base_url=base_url,
+        api_key=api_key,
+        temperature=temperature,
+        max_tokens=max_tokens
     )
     
     # Phase 2: Execute commands (now includes summary generation)
     results_file, summary_file = await run_execution_phase(
-        commands_file, output_dir, port, sandbox_image, concurrency, pool_size
+        commands_file=commands_file,
+        output_dir=output_dir,
+        port=port,
+        sandbox_image=sandbox_image,
+        concurrency=concurrency,
+        pool_size=pool_size,
     )
     
     # Combine both phase summaries into final summary
@@ -843,7 +874,7 @@ if __name__ == "__main__":
     parser.add_argument("--base-url", help="OpenAI-compatible API base URL (default: https://api.openai.com/v1)")
     parser.add_argument("--api-key", help="API key (can also use OPENAI_API_KEY env var)")
     parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
-    parser.add_argument("--max-tokens", type=int, default=2000, help="Maximum tokens to generate")
+    parser.add_argument("--max-tokens", type=int, default=32_000, help="Maximum tokens to generate")
     parser.add_argument("--sos-port", type=int, default=3000, help="Port of SoS sandbox server")
     
     # Phase selection
