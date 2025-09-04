@@ -2,9 +2,9 @@
   "model_name": "default",
   "dataset_path": "deathbyknowledge/shell-tasks",
   "total_samples": 1404,
-  "successful_samples": 193,
-  "success_rate": 0.13746438746438747,
-  "failed_samples": 1211,
-  "evaluation_time": "2025-09-04T01:14:00.650247+00:00",
+  "successful_samples": 192,
+  "success_rate": 0.13675213675213677,
+  "failed_samples": 1212,
+  "evaluation_time": "2025-09-04T01:15:17.464430+00:00",
   "sandbox_image": "deathbyknowledge/shellm-sandbox:latest"
 }

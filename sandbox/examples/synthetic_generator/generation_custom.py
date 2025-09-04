@@ -40,7 +40,8 @@ from datasets import load_dataset, Dataset
 from tenacity import retry, stop_after_attempt
 from sos import SoSClient
 
-
+import re
+import argparse
 def short_id() -> str:
     """uuid4 first 8 hex chars."""
     return uuid.uuid4().hex[:8]
@@ -63,7 +64,7 @@ def load_jsonl(path: Path) -> List[Dict[str, Any]]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def setup_logger(output_dir: Path, task_id: str) -> logging.Logger:
+def setup_logger(output_dir: Path, task_id: str, enable_file_logging: bool = False) -> logging.Logger:
     """Setup a logger for a specific evaluation task."""
     logger = logging.getLogger(f"eval_{task_id}")
     logger.setLevel(logging.ERROR)
@@ -71,19 +72,28 @@ def setup_logger(output_dir: Path, task_id: str) -> logging.Logger:
     # Remove any existing handlers
     logger.handlers.clear()
     
-    # Ensure output directory exists
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if enable_file_logging:
+        # Ensure output directory exists
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create file handler
+        log_file = output_dir / f"task_{task_id}.log"
+        file_handler = logging.FileHandler(log_file, mode='w')
+        file_handler.setLevel(logging.ERROR)
+        
+        # Create formatter
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        
+        logger.addHandler(file_handler)
+    else:
+        # Add console handler instead (optional)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.ERROR)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
     
-    # Create file handler
-    log_file = output_dir / f"task_{task_id}.log"
-    file_handler = logging.FileHandler(log_file, mode='w')
-    file_handler.setLevel(logging.ERROR)
-    
-    # Create formatter
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    
-    logger.addHandler(file_handler)
     return logger
 
 
@@ -114,7 +124,7 @@ class ModelInterface:
             http_client=httpx.AsyncClient(timeout=60.0),
         )
     
-    async def generate_command(self, task: str, temperature: float = 0.1, max_tokens: int = 512) -> str:
+    async def generate_command(self, task: str, temperature: float = 0.6, max_tokens: int = 32_000) -> str:
         """Generate shell command for a given task."""
         if self.mock_mode:
             return self._mock_generate_command(task)
@@ -153,7 +163,7 @@ class ModelInterface:
             return "echo 'Task completed'"
     
     @retry(stop=stop_after_attempt(3))
-    async def _real_generate_command(self, task: str, temperature: float = 0.1, max_tokens: int = 128) -> str:
+    async def _real_generate_command(self, task: str, temperature: float, max_tokens: int) -> str:
         """Generate shell command using real API."""
         # messages = [
         #     {
@@ -168,10 +178,9 @@ class ModelInterface:
         # ]
         messages = [
             {
-                "role": "user", 
-                "content": f"{task}"
+            "role": "user", 
+            "content": f'{task}. Wrap the shell command in {{"command":"[your_command_here]"}}'
             }
-            
         ]
         try:
             response = await self.client.chat.completions.create(
@@ -179,6 +188,11 @@ class ModelInterface:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                top_p=0.95,
+                extra_body={
+                    "top_k": 20,
+                    "min_p": 0,
+                }, 
             )
             
             generated_text = response.choices[0].message.content or ""
@@ -188,18 +202,30 @@ class ModelInterface:
             lines = generated_text.strip().split('\n')
             command = ""
             
-            for line in lines:
-                line = line.strip()
-                # Skip thinking tokens, explanations, or empty lines
-                if (line.startswith('<think>') or line.startswith('</think>') or 
-                    line.startswith('#') or line == "" or
-                    line.lower().startswith('here') or line.lower().startswith('the command')):
-                    continue
-                # Take the first valid line as the command
-                if line:
-                    command = line
-                    break
-            
+            # Try to parse JSON response first
+            try:
+                # Look for JSON-like pattern
+                json_match = re.search(r'\{"command"\s*:\s*"([^"]+)"\}', generated_text)
+                if json_match:
+                    command = json_match.group(1)
+                else:
+                    # Try to parse as actual JSON
+                    parsed_json = json.loads(generated_text.strip())
+                    if isinstance(parsed_json, dict) and "command" in parsed_json:
+                        command = parsed_json["command"]
+                    else:
+                        raise ValueError("No command field found")
+            except (json.JSONDecodeError, ValueError):
+                # Fall back to line-by-line parsing
+                # Look for content after </think> token
+                think_end = generated_text.find('</think>')
+                if think_end != -1:
+                    # Extract everything after </think>
+                    content_after_think = generated_text[think_end + len('</think>'):].strip()
+                    command = content_after_think
+                else:
+                    # If no </think> found, use the original text as-is
+                    command = generated_text.strip()
             # Remove common prefixes if present
             prefixes_to_remove = ["$ ", "# ", "bash: ", "shell: ", "`", "```bash", "```"]
             for prefix in prefixes_to_remove:
@@ -209,6 +235,7 @@ class ModelInterface:
             
             # Remove trailing backticks
             command = command.rstrip('`').strip()
+            print(f"Result Output: {repr(command)}")
             
             return command
             
@@ -242,7 +269,9 @@ async def evaluate_single_task(
     
     # Setup logger for this task
     logger = setup_logger(output_dir, task_id)
-    
+    logger.disabled = True
+    logger.propagate = False
+
     try:
         logger.info(f"STEP 1: Generate command for task")
         logger.info(f"Task: {task_data['task']}")
@@ -334,13 +363,15 @@ async def evaluate_single_task(
 async def evaluate_model(
     model_name: str,
     dataset_path: str,
+    temperature: float,
+    max_tokens: int,
+    port: int,
     output_dir: str = "evaluation_results",
     max_samples: Optional[int] = None,
     sandbox_image: str = "deathbyknowledge/shellm-sandbox:latest",
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
-    temperature: float = 0.1,
-    max_tokens: int = 512
+
 ) -> None:
     """
     Main evaluation pipeline.
@@ -360,6 +391,7 @@ async def evaluate_model(
     output_path = Path(output_dir)
     results_file = output_path / "results.jsonl"
     summary_file = output_path / "summary.json"
+    eval_start_time = datetime.now(timezone.utc)
     
     # Load model
     mock_mode = model_name.lower() == "mock" or base_url is None
@@ -383,7 +415,7 @@ async def evaluate_model(
     print(f"Evaluating {len(dataset)} samples")
     
     # Initialize SoS client
-    sos = SoSClient(server_url="http://localhost:3000")
+    sos = SoSClient(server_url=f"http://localhost:{port}")
     
     # Run evaluation with progress bar
     results = []
@@ -411,6 +443,9 @@ async def evaluate_model(
                 advance=1,
                 description=f"Evaluating ({success_count}/{i+1} successful) - Elapsed: {elapsed_str}"
             )
+            
+            elapsed = datetime.now(timezone.utc) - eval_start_time
+            elapsed_str = f"{int(elapsed.total_seconds()//3600):02d}:{int((elapsed.total_seconds()%3600)//60):02d}:{int(elapsed.total_seconds()%60):02d}"
             
             # Print status every 10 samples
             if (i + 1) % 10 == 0:
@@ -441,7 +476,6 @@ async def evaluate_model(
 
 
 if __name__ == "__main__":
-    import argparse
     
     parser = argparse.ArgumentParser(description="Evaluate OpenAI-compatible model on shell tasks")
     parser.add_argument("--model", required=True, help="Model name (e.g., 'gpt-4', 'gpt-3.5-turbo', 'mock' for testing)")
@@ -451,8 +485,9 @@ if __name__ == "__main__":
     parser.add_argument("--sandbox-image", default="deathbyknowledge/shellm-sandbox:latest", help="Docker image for sandbox")
     parser.add_argument("--base-url", help="OpenAI-compatible API base URL (default: https://api.openai.com/v1)")
     parser.add_argument("--api-key", help="API key (can also use OPENAI_API_KEY env var)")
-    parser.add_argument("--temperature", type=float, default=0.1, help="Sampling temperature")
-    parser.add_argument("--max-tokens", type=int, default=512, help="Maximum tokens to generate")
+    parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
+    parser.add_argument("--max-tokens", type=int, default=2000, help="Maximum tokens to generate")
+    parser.add_argument("--sos-port", type=int, default=3000, help="port of sos sandbox")
     
     args = parser.parse_args()
     
@@ -467,6 +502,7 @@ if __name__ == "__main__":
             api_key=args.api_key,
             temperature=args.temperature,
             max_tokens=args.max_tokens,
+            port=args.sos_port
         )
     
     asyncio.run(main())
