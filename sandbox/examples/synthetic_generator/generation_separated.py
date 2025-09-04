@@ -263,41 +263,53 @@ class ModelInterface:
             print(f"Raw model output: {repr(generated_text)}")
             
             # Clean up the response - remove thinking tokens and extract command
-            lines = generated_text.strip().split('\n')
             command = ""
             
             # Try to parse JSON response first
             try:
-                # Look for JSON-like pattern
-                json_match = re.search(r'\{"command"\s*:\s*"([^"]+)"\}', generated_text)
-                if json_match:
-                    command = json_match.group(1)
-                else:
-                    # Try to parse as actual JSON
-                    parsed_json = json.loads(generated_text.strip())
-                    if isinstance(parsed_json, dict) and "command" in parsed_json:
-                        command = parsed_json["command"]
-                    else:
-                        raise ValueError("No command field found")
-            except (json.JSONDecodeError, ValueError):
-                # Fall back to line-by-line parsing
-                # Look for content after </think> token
+                # Handle potential thinking tokens - extract content after </think>
+                content_to_parse = generated_text
                 think_end = generated_text.find('</think>')
                 if think_end != -1:
-                    # Extract everything after </think>
-                    content_after_think = generated_text[think_end + len('</think>'):].strip()
-                    command = content_after_think
+                    content_to_parse = generated_text[think_end + len('</think>'):].strip()
+                
+                # Try to parse as complete JSON object
+                parsed_json = json.loads(content_to_parse.strip())
+                if isinstance(parsed_json, dict) and "command" in parsed_json:
+                    command = parsed_json["command"]
                 else:
-                    # If no </think> found, use the original text as-is
+                    raise ValueError("No command field found")
+                    
+            except (json.JSONDecodeError, ValueError):
+                # Fall back to regex-based extraction for partial JSON
+                try:
+                    # More robust regex that handles escaped quotes
+                    json_match = re.search(r'\{"command"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}', generated_text, re.DOTALL)
+                    if json_match:
+                        # Unescape the command string
+                        raw_command = json_match.group(1)
+                        # Handle basic JSON string unescaping
+                        command = raw_command.replace('\\"', '"').replace('\\\\', '\\')
+                    else:
+                        # Look for content after </think> token as fallback
+                        think_end = generated_text.find('</think>')
+                        if think_end != -1:
+                            command = generated_text[think_end + len('</think>'):].strip()
+                        else:
+                            # Use the original text as-is
+                            command = generated_text.strip()
+                except Exception:
+                    # Final fallback
                     command = generated_text.strip()
-            # Remove common prefixes if present
+            
+            # Clean up common formatting artifacts
             prefixes_to_remove = ["$ ", "# ", "bash: ", "shell: ", "`", "```bash", "```"]
             for prefix in prefixes_to_remove:
                 if command.startswith(prefix):
                     command = command[len(prefix):]
                     break
             
-            # Remove trailing backticks
+            # Remove trailing backticks and extra whitespace
             command = command.rstrip('`').strip()
             print(f"Result Output: {repr(command)}")
             
