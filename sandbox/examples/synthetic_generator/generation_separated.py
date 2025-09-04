@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 from rich import print
-from rich.progress import Progress
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn
 
 from openai import AsyncOpenAI
 from datasets import load_dataset, Dataset
@@ -331,8 +331,19 @@ async def batch_generate_commands(
     if output_file.exists():
         output_file.unlink()
     
-    with Progress() as progress:
-        task_progress = progress.add_task("Generating commands", total=len(dataset))
+    # Enhanced progress bar with elapsed time and ETA
+    progress_columns = [
+        SpinnerColumn(),
+        TextColumn("[bold blue]Phase 1: Generating commands"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+    ]
+    
+    with Progress(*progress_columns) as progress:
+        task_progress = progress.add_task("", total=len(dataset))
         
         for i, sample in enumerate(dataset):
             try:
@@ -523,9 +534,21 @@ async def batch_execute_commands(
         async with execution_semaphore:
             return await execute_single_command_with_pool(command_data, sandbox_pool)
     
+    # Enhanced progress bar with success rate tracking
+    progress_columns = [
+        SpinnerColumn(),
+        TextColumn("[bold green]Phase 2: Executing commands"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TextColumn("[bold cyan]{task.fields[success_rate]:.1f}% success"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+    ]
+    
     try:
-        with Progress() as progress:
-            task_progress = progress.add_task("Executing commands", total=len(commands_data))
+        with Progress(*progress_columns) as progress:
+            task_progress = progress.add_task("", total=len(commands_data), success_rate=0.0)
             
             # Process commands in batches to avoid overwhelming the system
             batch_size = max(concurrency * 2, 10)
@@ -540,7 +563,6 @@ async def batch_execute_commands(
                 # Process results
                 for result in results:
                     if isinstance(result, Exception):
-                        print(f"Execution error: {result}")
                         # Create error result
                         result = {
                             "overall_success": False,
@@ -557,19 +579,13 @@ async def batch_execute_commands(
                     # Save result immediately
                     append_jsonl(output_file, result)
                     
-                    # Update progress
-                    elapsed = datetime.now(timezone.utc) - eval_start_time
-                    elapsed_str = f"{int(elapsed.total_seconds()//3600):02d}:{int((elapsed.total_seconds()%3600)//60):02d}:{int(elapsed.total_seconds()%60):02d}"
+                    # Update progress with current success rate
+                    current_success_rate = (success_count / completed_count * 100) if completed_count > 0 else 0
                     progress.update(
                         task_progress, 
                         advance=1,
-                        description=f"Executing ({success_count}/{completed_count} successful) - {elapsed_str}"
+                        success_rate=current_success_rate
                     )
-                
-                # Print progress every batch
-                if completed_count % (batch_size * 2) == 0 or completed_count == len(commands_data):
-                    success_rate = success_count / completed_count * 100
-                    print(f"Progress: {completed_count}/{len(commands_data)} - Success rate: {success_rate:.1f}%")
     
     finally:
         # Clean up sandbox pool
