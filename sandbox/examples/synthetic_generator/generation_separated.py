@@ -128,6 +128,8 @@ class SandboxPool:
         """Return a sandbox to the pool for reuse."""
         if sandbox_id in self.busy_sandboxes:
             setup_hash = self.busy_sandboxes.pop(sandbox_id)
+            if setup_hash not in self.available_sandboxes:
+                self.available_sandboxes[setup_hash] = []
             self.available_sandboxes[setup_hash].append(sandbox_id)
     
     async def _reset_sandbox(self, sandbox_id: str):
@@ -252,15 +254,16 @@ class ModelInterface:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                top_p=0.95,
+                top_p=0.8,
                 extra_body={
                     "top_k": 20,
                     "min_p": 0,
+                    "chat_template_kwargs": {"enable_thinking": False},
                 }, 
             )
             
             generated_text = response.choices[0].message.content or ""
-            print(f"Raw model output: {repr(generated_text)}")
+            # print(f"Raw model output: {repr(generated_text)}")
             
             # Clean up the response - remove thinking tokens and extract command
             command = ""
@@ -349,7 +352,6 @@ async def batch_generate_commands(
         TextColumn("[bold blue]Phase 1: Generating commands"),
         BarColumn(),
         MofNCompleteColumn(),
-        TaskProgressColumn(),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
     ]
@@ -398,6 +400,155 @@ async def batch_generate_commands(
     print(f"Phase 1 complete: Commands saved to {output_file}")
 
 
+async def execute_batch_with_semaphore(
+    commands_batch: List[Dict[str, Any]],
+    sos,
+    sandbox_image: str,
+    max_concurrent: int = 3
+) -> List[Dict[str, Any]]:
+    """
+    Execute a batch of commands with limited concurrency.
+    
+    Args:
+        commands_batch: List of command data dicts
+        sos: SoS instance
+        sandbox_image: Docker image for sandbox
+        max_concurrent: Maximum number of concurrent sandboxes
+    
+    Returns:
+        List of execution results
+    """
+    semaphore = asyncio.Semaphore(max_concurrent)
+    
+    async def execute_with_semaphore(cmd_data):
+        async with semaphore:
+            return await execute_single_command_simple(cmd_data, sos, sandbox_image)
+    
+    tasks = [execute_with_semaphore(cmd_data) for cmd_data in commands_batch]
+    
+    try:
+        # Wait for all with a reasonable timeout
+        results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=600.0  # 10 minute timeout for batch
+        )
+        return results
+    except asyncio.TimeoutError:
+        # Cancel all remaining tasks
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        raise
+
+
+async def execute_single_command_simple(
+    command_data: Dict[str, Any],
+    sos,
+    sandbox_image: str,
+) -> Dict[str, Any]:
+    """
+    Execute a single command using a fresh sandbox (no pooling).
+    
+    Args:
+        command_data: Dict with command info from batch_generate_commands
+        sos: SoS instance
+        sandbox_image: Docker image for sandbox
+    
+    Returns:
+        Dict with execution results
+    """
+    start_time = utc_now_iso()
+    
+    try:
+        # Skip if command generation failed
+        if command_data.get("generated_command") is None:
+            return {
+                **command_data,
+                "command_success": False,
+                "test_passed": False,
+                "overall_success": False,
+                "error": command_data.get("error", "Command generation failed"),
+                "start_time": start_time,
+                "end_time": utc_now_iso(),
+            }
+        
+        # Prepare setup commands
+        setup_commands = command_data['setup_commands']
+        if isinstance(setup_commands, list):
+            setup_commands = "; ".join(setup_commands)
+        
+        # Create fresh sandbox
+        sandbox_id = await sos.create_sandbox(
+            image=sandbox_image,
+            setup_commands=[setup_commands] if setup_commands else []
+        )
+        
+        try:
+            # Start sandbox
+            await sos.start_sandbox(sandbox_id)
+            
+            # Execute the generated command with timeout
+            generated_command = command_data['generated_command']
+            output, exit_code, exited = await asyncio.wait_for(
+                sos.exec_command(sandbox_id, generated_command),
+                timeout=60.0  # 60 second timeout
+            )
+            command_success = exit_code == 0
+            
+            # Test success condition with timeout
+            success_condition = command_data['success_condition']
+            _, test_exit_code, _ = await asyncio.wait_for(
+                sos.exec_command(sandbox_id, success_condition, standalone=True),
+                timeout=30.0  # 30 second timeout for tests
+            )
+            test_passed = test_exit_code == 0
+            
+            overall_success = command_success and test_passed
+            
+            result = {
+                **command_data,
+                "command_output": output,
+                "command_exit_code": exit_code,
+                "command_success": command_success,
+                "test_exit_code": test_exit_code,
+                "test_passed": test_passed,
+                "overall_success": overall_success,
+                "start_time": start_time,
+                "end_time": utc_now_iso(),
+                "exited": exited,
+            }
+            
+            return result
+            
+        finally:
+            # Always clean up sandbox
+            try:
+                await sos.stop_sandbox(sandbox_id, remove=True)
+            except Exception as cleanup_error:
+                print(f"Warning: Failed to cleanup sandbox {sandbox_id}: {cleanup_error}")
+                
+    except asyncio.TimeoutError as e:
+        return {
+            **command_data,
+            "command_success": False,
+            "test_passed": False,
+            "overall_success": False,
+            "error": f"Timeout: {str(e)}",
+            "start_time": start_time,
+            "end_time": utc_now_iso(),
+        }
+    except Exception as e:
+        return {
+            **command_data,
+            "command_success": False,
+            "test_passed": False,
+            "overall_success": False,
+            "error": str(e),
+            "start_time": start_time,
+            "end_time": utc_now_iso(),
+        }
+
+
 async def execute_single_command_with_pool(
     command_data: Dict[str, Any],
     sandbox_pool: SandboxPool,
@@ -436,14 +587,20 @@ async def execute_single_command_with_pool(
         sandbox_id, setup_hash = await sandbox_pool.get_sandbox(setup_commands)
         
         try:
-            # Execute the generated command
+            # Execute the generated command with timeout
             generated_command = command_data['generated_command']
-            output, exit_code, exited = await sandbox_pool.sos.exec_command(sandbox_id, generated_command)
+            output, exit_code, exited = await asyncio.wait_for(
+                sandbox_pool.sos.exec_command(sandbox_id, generated_command),
+                timeout=60.0  # 60 second timeout
+            )
             command_success = exit_code == 0
             
-            # Test success condition
+            # Test success condition with timeout
             success_condition = command_data['success_condition']
-            _, test_exit_code, _ = await sandbox_pool.sos.exec_command(sandbox_id, success_condition, standalone=True)
+            _, test_exit_code, _ = await asyncio.wait_for(
+                sandbox_pool.sos.exec_command(sandbox_id, success_condition, standalone=True),
+                timeout=30.0  # 30 second timeout for tests
+            )
             test_passed = test_exit_code == 0
             
             # Get full trajectory for debugging
@@ -472,7 +629,35 @@ async def execute_single_command_with_pool(
             # Return sandbox to pool for reuse
             await sandbox_pool.return_sandbox(sandbox_id)
             
+    except asyncio.TimeoutError:
+        # Clean up sandbox if it was acquired
+        if 'sandbox_id' in locals():
+            try:
+                await sandbox_pool.return_sandbox(sandbox_id)
+            except Exception:
+                pass  # Ignore cleanup errors
+        
+        return {
+            **command_data,
+            "command_output": "",
+            "command_exit_code": -1,
+            "command_success": False,
+            "test_exit_code": -1,
+            "test_passed": False,
+            "overall_success": False,
+            "error": "Command execution timed out",
+            "start_time": start_time,
+            "end_time": utc_now_iso(),
+        }
+        
     except Exception as e:
+        # Clean up sandbox if it was acquired
+        if 'sandbox_id' in locals():
+            try:
+                await sandbox_pool.return_sandbox(sandbox_id)
+            except Exception:
+                pass  # Ignore cleanup errors
+        
         return {
             **command_data,
             "command_output": "",
@@ -493,7 +678,7 @@ async def batch_execute_commands(
     output_file: Path,
     sandbox_image: str = "deathbyknowledge/shellm-sandbox:latest",
     concurrency: int = 4,
-    pool_size: int = 8,
+    batch_size: int = 1,
 ) -> None:
     """
     Phase 2: Execute pre-generated commands through sandboxes with concurrency and pooling.
@@ -504,7 +689,6 @@ async def batch_execute_commands(
         output_file: Path to save execution results (JSONL)
         sandbox_image: Docker image for sandboxes
         concurrency: Number of concurrent executions
-        pool_size: Maximum number of sandboxes in pool
     """
     # Load pre-generated commands
     commands_data = load_jsonl(commands_file)
@@ -512,39 +696,20 @@ async def batch_execute_commands(
         print(f"No commands found in {commands_file}")
         return
     
-    print(f"Phase 2: Executing {len(commands_data)} commands with {concurrency} concurrent workers")
-    print(f"Sandbox pool size: {pool_size}")
-    
-    # Group commands by setup to optimize sandbox reuse
-    setup_groups = defaultdict(list)
-    for cmd_data in commands_data:
-        setup_commands = cmd_data['setup_commands']
-        if isinstance(setup_commands, list):
-            setup_commands = "; ".join(setup_commands)
-        setup_hash = hash_setup_commands(setup_commands)
-        setup_groups[setup_hash].append(cmd_data)
-    
-    print(f"Grouped into {len(setup_groups)} setup configurations:")
-    for setup_hash, commands in setup_groups.items():
-        print(f"  {setup_hash}: {len(commands)} commands")
+    if batch_size == 1:
+        print(f"Phase 2: Executing {len(commands_data)} commands sequentially")
+        print("Running one command at a time for reliability")
+    else:
+        print(f"Phase 2: Executing {len(commands_data)} commands in batches of {batch_size}")
+        print(f"Using limited concurrency (max {min(batch_size, concurrency)} concurrent sandboxes per batch)")
     
     # Clear output file if it exists
     if output_file.exists():
         output_file.unlink()
     
-    # Initialize sandbox pool
-    sandbox_pool = SandboxPool(sos, sandbox_image, pool_size)
-    
     success_count = 0
     completed_count = 0
     eval_start_time = datetime.now(timezone.utc)
-    
-    # Concurrency semaphore
-    execution_semaphore = asyncio.Semaphore(concurrency)
-    
-    async def execute_with_semaphore(command_data: Dict[str, Any]) -> Dict[str, Any]:
-        async with execution_semaphore:
-            return await execute_single_command_with_pool(command_data, sandbox_pool)
     
     # Enhanced progress bar with success rate tracking
     progress_columns = [
@@ -552,7 +717,6 @@ async def batch_execute_commands(
         TextColumn("[bold green]Phase 2: Executing commands"),
         BarColumn(),
         MofNCompleteColumn(),
-        TaskProgressColumn(),
         TextColumn("[bold cyan]{task.fields[success_rate]:.1f}% success"),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
@@ -562,47 +726,90 @@ async def batch_execute_commands(
         with Progress(*progress_columns) as progress:
             task_progress = progress.add_task("", total=len(commands_data), success_rate=0.0)
             
-            # Process commands in batches to avoid overwhelming the system
-            batch_size = max(concurrency * 2, 10)
-            
-            for i in range(0, len(commands_data), batch_size):
-                batch = commands_data[i:i + batch_size]
-                
-                # Execute batch concurrently
-                batch_tasks = [execute_with_semaphore(cmd_data) for cmd_data in batch]
-                results = await asyncio.gather(*batch_tasks, return_exceptions=True)
-                
-                # Process results
-                for result in results:
-                    if isinstance(result, Exception):
-                        # Create error result
+            if batch_size == 1:
+                # Sequential processing
+                for i, cmd_data in enumerate(commands_data):
+                    try:
+                        result = await execute_single_command_simple(cmd_data, sos, sandbox_image)
+                    except Exception as e:
                         result = {
                             "overall_success": False,
-                            "error": str(result),
+                            "error": str(e),
                             "start_time": utc_now_iso(),
                             "end_time": utc_now_iso(),
                         }
                     
+                    # Process result
                     if result.get('overall_success', False):
                         success_count += 1
-                    
                     completed_count += 1
                     
                     # Save result immediately
                     append_jsonl(output_file, result)
                     
-                    # Update progress with current success rate
+                    # Update progress
                     current_success_rate = (success_count / completed_count * 100) if completed_count > 0 else 0
-                    progress.update(
-                        task_progress, 
-                        advance=1,
-                        success_rate=current_success_rate
-                    )
+                    progress.update(task_progress, advance=1, success_rate=current_success_rate)
+                    
+                    # Print progress every 10 commands
+                    if (i + 1) % 10 == 0:
+                        print(f"Completed {i + 1}/{len(commands_data)} commands ({current_success_rate:.1f}% success)")
+            
+            else:
+                # Batch processing
+                max_concurrent = min(batch_size, concurrency)  # Use concurrency parameter
+                
+                for i in range(0, len(commands_data), batch_size):
+                    batch = commands_data[i:i + batch_size]
+                    
+                    try:
+                        # Execute batch with limited concurrency
+                        batch_results = await execute_batch_with_semaphore(
+                            batch, sos, sandbox_image, max_concurrent
+                        )
+                    except Exception as e:
+                        # Create error results for entire batch
+                        batch_results = [
+                            {
+                                "overall_success": False,
+                                "error": str(e),
+                                "start_time": utc_now_iso(),
+                                "end_time": utc_now_iso(),
+                            }
+                            for _ in batch
+                        ]
+                    
+                    # Process batch results
+                    for result in batch_results:
+                        if isinstance(result, Exception):
+                            result = {
+                                "overall_success": False,
+                                "error": str(result),
+                                "start_time": utc_now_iso(),
+                                "end_time": utc_now_iso(),
+                            }
+                        
+                        if result.get('overall_success', False):
+                            success_count += 1
+                        completed_count += 1
+                        
+                        # Save result immediately
+                        append_jsonl(output_file, result)
+                    
+                    # Update progress
+                    current_success_rate = (success_count / completed_count * 100) if completed_count > 0 else 0
+                    progress.update(task_progress, advance=len(batch_results), success_rate=current_success_rate)
+                    
+                    # Print batch progress
+                    print(f"Completed batch {i//batch_size + 1}: {completed_count}/{len(commands_data)} total commands ({current_success_rate:.1f}% success)")
     
-    finally:
-        # Clean up sandbox pool
-        print("Cleaning up sandbox pool...")
-        await sandbox_pool.cleanup_all()
+    except KeyboardInterrupt:
+        print("\n❌ Execution interrupted by user")
+        raise
+    except Exception as e:
+        print(f"\n❌ Execution failed: {e}")
+        logger.exception("Execution error")
+        raise
     
     total_samples = len(commands_data)
     success_rate = success_count / total_samples if total_samples > 0 else 0
@@ -698,7 +905,7 @@ async def run_execution_phase(
     port: int = 3000,
     sandbox_image: str = "deathbyknowledge/shellm-sandbox:latest",
     concurrency: int = 4,
-    pool_size: int = 8,
+    batch_size: int = 1,
 ) -> Tuple[Path, Path]:
     """Run only the execution phase and generate summary."""
     start_time = datetime.now(timezone.utc)
@@ -711,7 +918,7 @@ async def run_execution_phase(
     results_file = output_path / "results.jsonl"
     summary_file = output_path / "summary.json"
     
-    await batch_execute_commands(commands_file, sos, results_file, sandbox_image, concurrency, pool_size)
+    await batch_execute_commands(commands_file, sos, results_file, sandbox_image, concurrency, batch_size)
     
     # Calculate timing
     end_time = datetime.now(timezone.utc)
@@ -738,7 +945,6 @@ async def run_execution_phase(
         "failed_samples": total_samples - successful_samples,
         "setup_groups": len(setup_groups),
         "concurrency": concurrency,
-        "pool_size": pool_size,
         "sandbox_image": sandbox_image,
         "duration_seconds": duration_seconds,
         "start_time": start_time.isoformat(),
@@ -753,7 +959,7 @@ async def run_execution_phase(
     duration_str = f"{int(duration_seconds//60):02d}:{int(duration_seconds%60):02d}"
     
     print(f"Execution complete: {successful_samples}/{total_samples} successful ({success_rate:.1%})")
-    print(f"Duration: {duration_str}, Setup groups: {len(setup_groups)}, Concurrency: {concurrency}, Pool size: {pool_size}")
+    print(f"Duration: {duration_str}, Concurrency: {concurrency}")
     print(f"Results: {results_file}")
     print(f"Summary: {summary_file}")
     
@@ -772,7 +978,7 @@ async def run_both_phases(
     api_key: Optional[str] = None,
     temperature: float = 0.6,
     concurrency: int = 4,
-    pool_size: int = 8,
+    batch_size: int = 1,
 ) -> None:
     """Run both inference and execution phases."""
     print("=== Running Both Phases ===")
@@ -789,7 +995,6 @@ async def run_both_phases(
         "api_key": "***" if api_key else None,
         "temperature": temperature,
         "concurrency": concurrency,
-        "pool_size": pool_size,
     }
     print(f"Parameters: {parameters}")
     # Phase 1: Generate commands
@@ -811,7 +1016,7 @@ async def run_both_phases(
         port=port,
         sandbox_image=sandbox_image,
         concurrency=concurrency,
-        pool_size=pool_size,
+        batch_size=batch_size,
     )
     
     # Combine both phase summaries into final summary
@@ -847,7 +1052,6 @@ async def run_both_phases(
         "failed_samples": execution_summary.get("failed_samples", 0),
         "setup_groups": execution_summary.get("setup_groups", 0),
         "concurrency": concurrency,
-        "pool_size": pool_size,
         "sandbox_image": sandbox_image,
         
         # Combined timing
@@ -895,10 +1099,10 @@ if __name__ == "__main__":
     parser.add_argument("--commands-file", help="Path to commands file (required for execution-only phase)")
     
     # Performance tuning
-    parser.add_argument("--concurrency", type=int, default=4, 
-                       help="Number of concurrent sandbox executions (default: 4)")
-    parser.add_argument("--pool-size", type=int, default=8,
-                       help="Maximum number of sandboxes in pool (default: 8)")
+    parser.add_argument("--concurrency", type=int, default=3, 
+                       help="Max concurrent sandboxes per batch (default: 3, ignored if batch-size=1)")
+    parser.add_argument("--batch-size", type=int, default=1,
+                       help="Number of commands to process in parallel (1 = sequential, >1 = batch parallel)")
     
     args = parser.parse_args()
     
@@ -943,7 +1147,7 @@ if __name__ == "__main__":
                 port=args.sos_port,
                 sandbox_image=args.sandbox_image,
                 concurrency=args.concurrency,
-                pool_size=args.pool_size,
+                batch_size=args.batch_size,
             )
             print(f"Execution complete. Results: {results_file}, Summary: {summary_file}")
             
@@ -960,7 +1164,7 @@ if __name__ == "__main__":
                 temperature=args.temperature,
                 max_tokens=args.max_tokens,
                 concurrency=args.concurrency,
-                pool_size=args.pool_size,
+                batch_size=args.batch_size,
             )
     
     asyncio.run(main())

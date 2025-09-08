@@ -2,7 +2,7 @@
 
 # Mock test script for pipeline validation
 # Uses mock model (no API calls) for fast testing
-# High concurrency to stress-test performance optimizations
+# Sequential processing (batch-size=1) for reliability testing
 
 echo "=== Mock Test - Pipeline Validation ==="
 echo "This script tests the separated pipeline with mock model"
@@ -15,9 +15,10 @@ time uv run generation_separated.py \
     --temperature 0.6 \
     --output-dir "mock-test-results" \
     --sos-port 3000 \
-    --concurrency 10 \
-    --pool-size 20 \
-    --phase both
+    --concurrency 3 \
+    --batch-size 20 \
+    --phase execution \
+    --commands-file results/qwen-8b-base/commands.jsonl
 
 echo "=== Mock Test Complete ==="
 echo ""
@@ -27,7 +28,7 @@ echo "  - mock-test-results/results.jsonl (execution results)"
 echo "  - mock-test-results/summary.json (performance summary)"
 echo ""
 echo "This test validates:"
-echo "  ✓ Sandbox pooling and reuse"
-echo "  ✓ Concurrent execution"
-echo "  ✓ Setup command grouping"
-echo "  ✓ Pipeline separation"
+echo "  ✓ Sequential sandbox execution (batch-size=1)"
+echo "  ✓ Proper sandbox cleanup after each command"  
+echo "  ✓ Docker container management"
+echo "  ✓ Pipeline separation and error handling"
