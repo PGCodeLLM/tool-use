@@ -1,0 +1,89 @@
+pipeline:
+  run_id: pg-oh-shelltasks-5171s-flat-pg-nofewshot-lastthink
+  dataset_train: oh-shell-tasks-mt-distill-ds-31_correct_5171s_cleaned_flat_pg_nofewshot_lastthink_sft_rdy.jsonl
+  dataset_train_count: 5171
+  dataset_validation: Validation_with_explaination.jsonl  # basically a placeholder
+  dataset_validation_count: 432
+  max_input_token_count: 81920
+  dataset_description: "(multi think fix) 5.171k oh distilled shell-tasks samples, flattened in PG format, last-think, no-few-shot example"
+  gpus: "4,5,6,7"
+
+llamafactory:
+  ### model - Base model for initialization
+  model_name_or_path: /home/original_models/openPangu-Embedded-7B-V1.1_gpu
+  trust_remote_code: true
+  # Splits the model layers so intermediate activations aren't all kept in memory.
+  gradient_checkpointing: true
+
+  # memory optimizations:
+  low_cpu_mem_usage: true
+  remove_unused_columns: true
+  save_safetensors: true
+  # Add memory-efficient training arguments
+  ignore_data_skip: true
+  # sequence packing for better memory utilization
+  packing: true
+
+  # Dataloader optimizations
+  dataloader_pin_memory: false
+  dataloader_num_workers: 64
+  preprocessing_num_workers: 64
+
+
+  ### method
+  stage: sft
+  do_train: true
+  finetuning_type: full
+  deepspeed: <to_be_filled>
+  flash_attn: fa2
+
+  ### dataset
+  dataset: <to_be_filled>
+  template: pangu
+  cutoff_len: 32768
+  max_samples: 5171
+  overwrite_cache: true
+  preprocessing_num_workers: 16
+  dataloader_num_workers: 0
+
+  ### output
+  output_dir: <to_be_filled>
+  logging_steps: 1
+  save_strategy: steps
+  save_steps: 5
+  # save_strategy: epoch
+  # keeps the most recent N checkpoints
+  save_total_limit: 5
+  plot_loss: true
+  overwrite_output_dir: true
+  save_only_model: false
+  report_to: wandb
+  run_name: <to_be_filled>
+
+  ### train - Resume from converted DeepSpeed checkpoint
+  num_train_epochs: 5  
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 1.0e-5  # Original learning rate
+  lr_scheduler_type: cosine
+  # this was originally hardcoded in pipeline.py, now fixed thx to Amir/Sky
+  warmup_ratio: 0.03
+  weight_decay: 0.1
+  bf16: true
+  fp16: false
+  ddp_timeout: 180000000
+  resume_from_checkpoint: null # if want to resume from checkpoint, put absolute path here
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_epsilon: 1.0e-8
+
+  ### eval
+  do_eval: true
+  eval_dataset: <to_be_filled>
+  per_device_eval_batch_size: 1
+  # eval_strategy: epochs
+  eval_strategy: steps
+  eval_on_each_dataset: true
+  # increasing because we have to many steps anyway.
+  # eval_epochs: 5
+  eval_steps: 5
