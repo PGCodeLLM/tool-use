@@ -1,0 +1,2 @@
+# don't upload actual data .jsonl, those are on HF
+./shell-use-openhands/data/*.jsonl
