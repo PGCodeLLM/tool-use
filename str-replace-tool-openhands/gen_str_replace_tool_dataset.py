@@ -7,6 +7,7 @@ import json
 import re
 from tqdm import tqdm
 import os
+import pandas as pd
 
 # %% extract tool interactions and their context
 def extract_str_replace_tool_interactions(messages: list[dict]) -> list[dict]:
@@ -42,7 +43,7 @@ def extract_str_replace_tool_interactions(messages: list[dict]) -> list[dict]:
 
         # command
         cmatch = re.findall(r".*?<parameter=command>(.*?)</parameter>.*?", text, re.DOTALL)
-        cmd = cmatch[0] if pmatch else None
+        cmd = cmatch[0] if cmatch else None
 
         # tool call result
         if all([x in result['content'] for x in ['ERROR:', 'Exit code:', 'Execution output of']]):
@@ -111,16 +112,191 @@ def process_instance_json(json_fpath: str, save_path: str = None) -> list[dict]:
                 f.write(json.dumps(data) + '\n')
 
     return new_data
-        
+
+# %%
+def convert_str_replace_to_sft_ready(jsonl_fpath: str, convert_to_pg: bool):
+    """
+    TODO: Refactor! Thrown together very quickly
+    """
+    with open(jsonl_fpath, 'r') as f:
+        data = [json.loads(line.rstrip('\n')) for line in f]
+
+    new_data = []
+
+    for sample in tqdm(data):
+        if sample['command'] != 'str_replace' and sample['status'] != 'success':
+            continue
+
+        # convert to pg format simulated-multiturn and last think
+        trajectory = sample['context'] + [sample['tool_call']]
+        sys_msg, usr_msg, final_assistant = merge_prompt_and_last_response(trajectory,
+                                                                           apply_pangu_template=True,
+                                                                           lastthink=True)
+
+        # HACK: workaround for the remaining <think> tag
+        if '<think>' in final_assistant['content']:
+            final_assistant['content'] = final_assistant['content'].replace('<think>', '')
+
+        # new_data.append({
+        #     'benchmark_task_id': data['sample_id'],
+        #     'meta_propmt': sys_msg['content'],
+        #     'data': [usr_msg, final_assistant] 
+        # })
+
+        with open('/shared_workspace_mfs/kirill/tool-use/str-replace-tool-openhands/data/str_replace_tool_call_lastthink_multiturn.jsonl', 'a') as f:
+            f.write(json.dumps({
+                        'benchmark_task_id': sample['sample_id'],
+                        'meta_prompt': sys_msg['content'],
+                        'data': [usr_msg, final_assistant] 
+                    }) + '\n')
+
+
+    # df = pd.read_json(jsonl_fpath, lines=True, orient='records')
+    # df = df[(df['status'] == 'success') and (df['command'] == 'str_replace')]
+
+    # # df['meta_prompt'] = df['context'].apply(lambda x: x[0]['content'])
+    # df['traj'] = df.apply(lambda row: row['context'] + row['tool_call'])
+
+    # def _lastthink_simulated_multiturn(messages):
+    #     sys_msg, usr_msg, final_assistant = merge_prompt_and_last_response(messages,
+    #                                                                        apply_pangu_template=True,
+    #                                                                        lastthink=True)
+    #     return sys_msg, [usr_msg, final_assistant]
+    # df[['meta_prompt', 'data']] = df['traj'].apply(_lastthink_simulated_multiturn(), result_type='expand')
+
+    # df = df
+
+
+def remove_think_blocks(text: str) -> str:
+    """
+    Remove all <think>...</think> blocks from the given text.
+    """
+    return re.sub(r"<think>.*?(</think>|$)", "", text, flags=re.DOTALL)
+
+def extract_last_think_block(text: str):
+    """
+    Extract the last <think>...</think> block and the remaining answer.
+    """
+    match = re.search(r"(<think>.*?</think>)(.*)", text, flags=re.DOTALL)
+    if match:
+        return match.group(1), match.group(2).strip()
+    return "", text.strip()
+
+def merge_prompt_and_last_response(messages, apply_pangu_template=False, lastthink=True):
+    """
+    Keep the first system message as-is.
+    Merge all user and assistant messages (except the last assistant)
+    into a single user message.
+    Keep the last assistant message with its <think> block intact.
+    Optionally apply Pangu-style formatting.
+    """
+    if not messages:
+        return None, None, None
+
+    system_msg = next((m for m in messages if m["role"] == "system"), None)
+    if system_msg is None:
+        system_msg = {"role": "system", "content": ""}
+
+    compressed_lines = []
+    first_user_encountered = False
+    assistant_count = 0
+
+    for i, msg in enumerate(messages):
+        role = msg["role"]
+        content = msg["content"]
+
+        if msg is system_msg:
+            continue
+        if i == len(messages) - 1 and role == "assistant":
+            continue
+
+        # Strip leading newlines if applying Pangu template
+        if apply_pangu_template:
+            content = content.lstrip("\n")
+
+        if role == "assistant":
+            assistant_count += 1
+            clean_content = remove_think_blocks(content) if lastthink else content
+            # if apply_pangu_template:
+            #     line = f"/no_think[unused10][unused9]助手：[unused16][unused17]{clean_content.strip()}"
+            # else:
+            #     line = f"Assistant: {clean_content.strip()}"
+            if apply_pangu_template:
+                if lastthink:
+                    line = f"/no_think[unused10][unused9]助手：[unused16][unused17]{clean_content.strip()}"
+                else:
+                    thinking, tool_call = extract_last_think_block(clean_content)
+                    # Replace <think>\n with [unused16]
+                    thinking = re.sub(r"<think>\s*\n*", "", thinking)
+
+                    # Replace \n</think>\n\n with [unused17]
+                    thinking = re.sub(r"\n*</think>\s*\n*", "", thinking)
+
+                    # Strip any trailing newlines after replacement
+                    thinking = thinking.rstrip("\n")
+                    
+                    line = f"[unused10][unused9]助手：[unused16]{thinking}[unused17]{tool_call.strip()}"
+            else:
+                # TODO: update to non-lastthink format
+                line = f"Assistant: {clean_content.strip()}"
+            compressed_lines.append(line)
+
+        elif role == "user":
+            if apply_pangu_template and not first_user_encountered:
+                line = content.strip()
+                first_user_encountered = True
+            elif apply_pangu_template:
+                line = f"[unused10][unused9]用户：{content.strip()}"
+            else:
+                line = f"User: {content.strip()}"
+            compressed_lines.append(line)
+
+
+    # user_msg = {"role": "user", "content": "\n".join(compressed_lines).strip()}
+    user_msg = {"role": "user", "content": "".join(compressed_lines).strip()}
+    # user_msg = messages[1] # temp for no trajectory
+
+    last_msg = messages[-1]
+    if last_msg["role"] != "assistant":
+        return None, None, None
+    # TODO: For some reason, the assistant message still has one <think> tag after all this processing
+    think, answer = extract_last_think_block(last_msg["content"])
+    final_assistant = {"role": "assistant", "content": f"{think}\n\n{answer}".strip()}
+    if apply_pangu_template:
+        # think = think.replace("<think>\n", "[unused16]").replace("\n</think>\n\n", "[unused17]")
+        # Replace <think>\n with [unused16]
+        think = re.sub(r"\s*\n*<think>\s*\n*", "[unused16]", think)
+
+        # Replace \n</think>\n\n with [unused17]
+        think = re.sub(r"\s*\n*</think>\s*\n*", "[unused17]", think)
+
+        # Strip any trailing newlines after replacement
+        think = think.rstrip("\n")
+    
+        final_assistant = {"role": "assistant", "content": f"{think}{answer}".strip()}
+
+    return system_msg, user_msg, final_assistant
+
+
 # %%
 if __name__ == "__main__":
 
-    SOURCE_DATA_PATH = "/shared_workspace_mfs/datasets/mindforgeoh-rjsmp/deepSWE32B_rjsmp_swegymplus"
+    # SOURCE_DATA_PATH = "/shared_workspace_mfs/datasets/mindforgeoh-rjsmp/deepSWE32B_rjsmp_swegymplus"
+    # file_paths = glob.glob(f"{SOURCE_DATA_PATH}/*")
+
+    # SAVE_DIR = "/shared_workspace_mfs/kirill/tool-use/str-replace-tool-openhands/data/deepSWE32B_rjsmp_swegymplus"
+
+    # for fpath in tqdm(file_paths):
+    #     _ = process_instance_json(fpath, save_path=SAVE_DIR)
+
+    # convert to pg fake-multiturn last think
+    SOURCE_DATA_PATH = "/shared_workspace_mfs/kirill/tool-use/str-replace-tool-openhands/data/deepSWE32B_rjsmp_swegymplus"
     file_paths = glob.glob(f"{SOURCE_DATA_PATH}/*")
 
-    SAVE_DIR = "/shared_workspace_mfs/kirill/tool-use/str-replace-tool-openhands/data"
-
+    # TODO: to refactor later
     for fpath in tqdm(file_paths):
-        _ = process_instance_json(fpath)
-        
+        convert_str_replace_to_sft_ready(fpath, True)
+
+
+
 # %%
