@@ -1,2 +1,10 @@
 # don't upload actual data .jsonl, those are on HF
 ./shell-use-openhands/data/*.jsonl
+str-replace-tool-openhands/data
+
+# virtual env
+venv
+.venv
+
+# env variables
+.env
